@@ -17,13 +17,16 @@ package main
 import (
 	"flag"
 	"os"
+	"time"
 
-	//	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	//	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	//	"k8s.io/apimachinery/pkg/labels"
 	//	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
-	//	"k8s.io/client-go/pkg/api"
+	"k8s.io/client-go/pkg/api/v1"
 	//	"k8s.io/client-go/pkg/apis/extensions"
 	//	"k8s.io/client-go/pkg/apis/extensions/v1beta1"
 	restclient "k8s.io/client-go/rest"
@@ -32,9 +35,15 @@ import (
 	"github.com/heketi/utils"
 )
 
+const (
+	pvcCreatorAnnotationSizeAvailable = "pvc-create.alpha.kubernetes.io/size-available"
+	demoPvcName                       = "pvc-create-sample-pvc"
+)
+
 var (
-	logger     = utils.NewLogger("pvc-create", utils.LEVEL_INFO)
-	kubeconfig string
+	logger       = utils.NewLogger("pvc-create", utils.LEVEL_INFO)
+	kubeconfig   string
+	storageClass string
 )
 
 type pvcCreator struct {
@@ -44,6 +53,10 @@ type pvcCreator struct {
 func init() {
 	flagset := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	flagset.StringVar(&kubeconfig, "kubeconfig", "", "Path to kubeconfig.")
+	flagset.StringVar(&storageClass,
+		"storageclass",
+		"",
+		"StorageClass example: gluster.qm.gluster. Check your system for storage classes")
 	flagset.Parse(os.Args[1:])
 }
 
@@ -62,6 +75,28 @@ func main() {
 		return
 	}
 	logger.Info("connection to Kubernetes established. Cluster version %s", ver)
+
+	// List PVCs on default namespace
+	p.ListPvcs("default")
+
+	// If storage class provided, create a pvc
+	if len(storageClass) != 0 {
+		err = p.CreatePVC("default", storageClass)
+		if err != nil {
+			return
+		}
+
+		// List
+		p.ListPvcs("default")
+
+		err = p.DeletePVC("default")
+		if err != nil {
+			return
+		}
+		// List
+		p.ListPvcs("default")
+
+	}
 
 }
 
@@ -104,4 +139,108 @@ func (p *pvcCreator) GetVersion() (string, error) {
 	}
 
 	return v.String(), nil
+}
+
+func (p *pvcCreator) ListPvcs(namespace string) error {
+
+	pvcs := p.kclient.Core().PersistentVolumeClaims(namespace)
+	list, err := pvcs.List(meta.ListOptions{})
+	if err != nil {
+		return logger.Err(err)
+	}
+
+	logger.Info("Number of PVCs: %d", len(list.Items))
+	for _, pvc := range list.Items {
+		logger.Info("PVC: %s\n"+
+			"\tVolume name: %s\n"+
+			"\tSize Available: %s\n",
+			pvc.GetName(),
+			pvc.Spec.VolumeName,
+			pvc.Annotations[pvcCreatorAnnotationSizeAvailable])
+	}
+
+	return nil
+}
+
+func (p *pvcCreator) CreatePVC(namespace, storageClass string) error {
+	pvc := &v1.PersistentVolumeClaim{
+		ObjectMeta: meta.ObjectMeta{
+			Name:      demoPvcName,
+			Namespace: namespace,
+			Labels: map[string]string{
+				"createBy": "pvc-create",
+			},
+			Annotations: map[string]string{
+				pvcCreatorAnnotationSizeAvailable:         "10",
+				"volume.beta.kubernetes.io/storage-class": storageClass,
+			},
+		},
+		Spec: v1.PersistentVolumeClaimSpec{
+			AccessModes: []v1.PersistentVolumeAccessMode{
+				v1.ReadWriteMany,
+			},
+			Resources: v1.ResourceRequirements{
+				Requests: v1.ResourceList{
+					v1.ResourceName(v1.ResourceStorage): resource.MustParse("10"),
+				},
+			},
+		},
+	}
+
+	// Get an API to submit the PVC
+	pvcs := p.kclient.Core().PersistentVolumeClaims(namespace)
+
+	// Submit PVC
+	logger.Info("PVC %s submitted", pvc.GetName())
+	_, err := pvcs.Create(pvc)
+	if apierrors.IsAlreadyExists(err) {
+		logger.Warning("pvc already exists")
+		return nil
+	} else if err != nil {
+		logger.Err(err)
+	} else {
+		logger.Info("Waiting for PVC to be bound")
+		return wait.Poll(3*time.Second, 10*time.Minute, func() (bool, error) {
+
+			// Get the PVC state from Kube
+			p, err := pvcs.Get(pvc.GetName(), meta.GetOptions{})
+			if err != nil {
+				return false, logger.Err(err)
+			}
+
+			// Check if the pvc is bound
+			if p.Status.Phase == v1.ClaimBound {
+				return true, nil
+			}
+
+			// Not bound yet
+			return false, nil
+		})
+	}
+
+	return nil
+}
+
+func (p *pvcCreator) DeletePVC(namespace string) error {
+
+	// Get an API to submit the PVC
+	pvcs := p.kclient.Core().PersistentVolumeClaims(namespace)
+
+	// Delete the PVC
+	logger.Info("Deleting PVC %s", demoPvcName)
+	pvcs.Delete(demoPvcName, &meta.DeleteOptions{})
+
+	// Wait until it is deleted
+	return wait.Poll(3*time.Second, 10*time.Minute, func() (bool, error) {
+
+		// Get the PVC state from Kube
+		_, err := pvcs.Get(demoPvcName, meta.GetOptions{})
+		if err != nil {
+			// Does not exist, so we are done
+			return true, nil
+		}
+
+		// Still there
+		return false, nil
+	})
 }
