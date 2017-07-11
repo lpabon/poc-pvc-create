@@ -1,0 +1,9 @@
+package: github.com/lpabon/poc-pvc-create
+import:
+- package: github.com/heketi/utils
+- package: k8s.io/client-go
+  version: ^3.0.0-beta.0
+  subpackages:
+  - kubernetes
+  - rest
+  - tools/clientcmd
