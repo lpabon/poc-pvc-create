@@ -38,7 +38,6 @@ var (
 )
 
 type pvcCreator struct {
-	rclient *restclient.RESTClient
 	kclient *kubernetes.Clientset
 }
 
@@ -60,35 +59,39 @@ func main() {
 	// Show version
 	ver, err := p.GetVersion()
 	if err != nil {
-		return logger.Err(err)
+		return
 	}
 	logger.Info("connection to Kubernetes established. Cluster version %s", ver)
 
 }
 
-func newPvcCreator(kubeconfig *string) *pvcCreator {
+func newPvcCreator(kubeconfig string) *pvcCreator {
 	p := &pvcCreator{}
 
 	// Setup REST client to Kubernetes
 	var err error
+	var cfg *restclient.Config
 	if len(kubeconfig) != 0 {
 		// Get configuration from kubeconfig file
-		p.rclient, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
+		cfg, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
 		if err != nil {
-			return logger.Err(err)
+			logger.Err(err)
+			return nil
 		}
 	} else {
 		// Running as a container inside Kubernetes
-		p.rclient, err = restclient.InClusterConfig()
+		cfg, err = restclient.InClusterConfig()
 		if err != nil {
-			return logger.Err(err)
+			logger.Err(err)
+			return nil
 		}
 	}
 
 	// Setup Clientset (High level APIs) for Kube
-	p.kclient, err = kubernetes.NewForConfig(p.rclient)
+	p.kclient, err = kubernetes.NewForConfig(cfg)
 	if err != nil {
-		return logger.Err(err)
+		logger.Err(err)
+		return nil
 	}
 
 	return p
